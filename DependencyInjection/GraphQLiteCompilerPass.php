@@ -10,10 +10,12 @@ use GraphQL\Validator\Rules\DisableIntrospection;
 use GraphQL\Validator\Rules\QueryComplexity;
 use GraphQL\Validator\Rules\QueryDepth;
 use Kcs\ClassFinder\Finder\ComposerFinder;
+use Kcs\ClassFinder\Finder\FinderInterface;
 use ReflectionNamedType;
 use Symfony\Component\Cache\Adapter\ApcuAdapter;
 use Symfony\Component\Cache\Adapter\PhpFilesAdapter;
 use Symfony\Component\Cache\Psr16Cache;
+use Symfony\Component\Finder\Finder;
 use Symfony\Component\PasswordHasher\Hasher\UserPasswordHasherInterface;
 use TheCodingMachine\GraphQLite\Mappers\StaticClassListTypeMapperFactory;
 use Webmozart\Assert\Assert;
@@ -239,16 +241,18 @@ class GraphQLiteCompilerPass implements CompilerPassInterface
             }
         }
 
+        $finder = $this->createFinder($container);
+
         foreach ($controllersNamespaces as $controllersNamespace) {
             $schemaFactory->addMethodCall('addControllerNamespace', [ $controllersNamespace ]);
-            foreach ($this->getClassList($controllersNamespace) as $className => $refClass) {
+            foreach ($this->getClassList($controllersNamespace, $finder) as $className => $refClass) {
                 $this->makePublicInjectedServices($refClass, $reader, $container, true);
             }
         }
 
         foreach ($typesNamespaces as $typeNamespace) {
             $schemaFactory->addMethodCall('addTypeNamespace', [ $typeNamespace ]);
-            foreach ($this->getClassList($typeNamespace) as $className => $refClass) {
+            foreach ($this->getClassList($typeNamespace, $finder) as $className => $refClass) {
                 $this->makePublicInjectedServices($refClass, $reader, $container, false);
             }
         }
@@ -482,13 +486,123 @@ class GraphQLiteCompilerPass implements CompilerPassInterface
      * @param string $namespace
      * @return Generator<class-string, ReflectionClass<object>, void, void>
      */
-    private function getClassList(string $namespace): Generator
+    private function getClassList(string $namespace, FinderInterface $finder): Generator
     {
-        $finder = new ComposerFinder();
         foreach ($finder->inNamespace($namespace) as $class) {
             assert($class instanceof ReflectionClass);
             yield $class->getName() => $class;
         }
     }
 
+    private function createFinder(ContainerBuilder $container): FinderInterface
+    {
+        return new class($container) implements FinderInterface {
+            /** @var string[] */
+            private array $namespaces;
+
+            private string $projectDir;
+
+            /** @var string[] */
+            private array $namespaceControllers;
+
+            /** @var string[] */
+            private array $namespaceTypes;
+
+            public function __construct(ContainerBuilder $container)
+            {
+                $this->namespaceTypes = $container->getParameter('graphqlite.namespace.types');
+                $this->namespaceControllers = $container->getParameter('graphqlite.namespace.controllers');
+                $this->projectDir = $container->getParameter('kernel.project_dir');
+            }
+
+            public function getIterator(): \Traversable
+            {
+                $namespaces = $this->namespaces ?? [...$this->namespaceControllers, ...$this->namespaceTypes];
+
+                foreach ($namespaces as $namespace) {
+                    $dir = "{$this->projectDir}/src/".\str_replace(['Qbil\\', '\\'], '/', $namespace);
+
+                    if (!\is_dir($dir)) {
+                        continue;
+                    }
+
+                    $finder = new Finder();
+
+                    $finder->files()->in($dir)->name('*.php');
+
+                    foreach ($finder as $file) {
+                        $class = 'Qbil'
+                            .\str_replace(
+                                '/',
+                                '\\',
+                                \str_replace(["$this->projectDir/src/", '.php'], '', $file->getPathname()),
+                            );
+
+                        if (!\class_exists($class)) {
+                            continue;
+                        }
+
+                        yield $class => new \ReflectionClass($class);
+                    }
+                }
+            }
+
+            public function implementationOf(array|string $interface): FinderInterface
+            {
+                return $this;
+            }
+
+            public function subclassOf(?string $superClass): FinderInterface
+            {
+                return $this;
+            }
+
+            public function annotatedBy(?string $annotationClass): FinderInterface
+            {
+                return $this;
+            }
+
+            public function withAttribute(?string $attributeClass): FinderInterface
+            {
+                return $this;
+            }
+
+            public function in(array|string $dirs): FinderInterface
+            {
+                return $this;
+            }
+
+            public function inNamespace(array|string $namespaces): FinderInterface
+            {
+                $this->namespaces = (array) $namespaces;
+
+                return $this;
+            }
+
+            public function notInNamespace(array|string $namespaces): FinderInterface
+            {
+                return $this;
+            }
+
+            public function filter(?callable $callback): FinderInterface
+            {
+                return $this;
+            }
+
+            public function path(string $pattern): FinderInterface
+            {
+                return $this;
+            }
+
+            public function notPath(string $pattern): FinderInterface
+            {
+                return $this;
+            }
+
+            public function pathFilter(?callable $callback): FinderInterface
+            {
+                return $this;
+            }
+        };
+    }
 }
